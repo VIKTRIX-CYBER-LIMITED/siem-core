@@ -40,7 +40,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$InstallDir = $InstallDir.Trim('"').TrimEnd('\')
+# The MSI passes "[APPLICATIONFOLDER]." so the quoted argument never ends in a backslash.
+$InstallDir = [IO.Path]::GetFullPath($InstallDir.Trim('"')).TrimEnd('\')
 $VindexDir = Join-Path $InstallDir 'vindex'
 $LogPath = Join-Path $VindexDir 'setup.log'
 $Baseline = Join-Path $VindexDir 'sysmon-baseline.xml'

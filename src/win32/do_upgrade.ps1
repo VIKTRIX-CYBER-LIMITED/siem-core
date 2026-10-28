@@ -98,7 +98,7 @@ function check-process {
     $counter = 10
     while($process_id -eq $null -And $counter -gt 0) {
         $counter--
-        Start-Service -Name "Wazuh"
+        Start-Service -Name "WazuhSvc"
         Start-Sleep 2
         $process_id = (Get-Process wazuh-agent).id
     }
@@ -116,7 +116,7 @@ function check-installation {
         $actual_version = get-version
     }
     write-output "$(Get-Date -format u) - Starting Wazuh-Agent service." >> .\upgrade\upgrade.log
-    Start-Service -Name "Wazuh"
+    Start-Service -Name "WazuhSvc"
 }
 
 # Function to extract the version from the MSI using msiexec
@@ -180,7 +180,7 @@ function install {
     )
 
     kill -processname win32ui -ErrorAction SilentlyContinue -Force
-    Stop-Service -Name "Wazuh"
+    Stop-Service -Name "WazuhSvc"
     Remove-Item .\upgrade\upgrade_result -ErrorAction SilentlyContinue
     write-output "$(Get-Date -format u) - Starting upgrade process." >> .\upgrade\upgrade.log
 
