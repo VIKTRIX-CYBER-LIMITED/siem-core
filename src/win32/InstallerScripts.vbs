@@ -442,9 +442,17 @@ Public Function KillGUITask()
 End Function
 
 Public Function StartWazuhSvc()
-	Set WshShell = CreateObject("WScript.Shell")
-    StartSvc = "NET START WazuhSvc"
-    WshShell.run StartSvc, 0, True
+    ' One NET START can land while the replaced agent is still exiting and fail silently,
+    ' leaving the upgraded agent stopped. Retry until the service reports RUNNING (about 60s).
+    Set WshShell = CreateObject("WScript.Shell")
+    scPath = WshShell.ExpandEnvironmentStrings("%SystemRoot%") & "\System32\sc.exe"
+    For attempt = 1 To 12
+        WshShell.run "NET START WazuhSvc", 0, True
+        Set objExec = WshShell.Exec(scPath & " query WazuhSvc")
+        If IsStateRunning(objExec.StdOut.ReadAll()) Then Exit For
+        WshShell.run "cmd /c ping -n 6 127.0.0.1 >nul", 0, True
+    Next
+    StartWazuhSvc = 0
 End Function
 
 Public Function SetWazuhPermissions()
