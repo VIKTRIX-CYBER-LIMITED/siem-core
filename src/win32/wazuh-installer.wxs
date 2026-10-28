@@ -833,7 +833,7 @@
                 <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes" Text="Connect this device to your organisation." />
                 <Control Id="Help" Type="Text" X="20" Y="60" Width="330" Height="40" NoPrefix="yes"
                     Text="Paste the install code from the Vindex console (Endpoints, Add a device). The code ties this device to your organisation and expires after a day." />
-                <Control Id="CodeLabel" Type="Text" X="20" Y="110" Width="330" Height="12" NoPrefix="yes" Text="&amp;Install code:" />
+                <Control Id="CodeLabel" Type="Text" X="20" Y="110" Width="330" Height="12" NoPrefix="yes" Text="Install code:" />
                 <Control Id="Code" Type="Edit" X="20" Y="124" Width="330" Height="18" Property="INSTALL_CODE" Text="{2048}" />
                 <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
                 <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)">
