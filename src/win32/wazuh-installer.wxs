@@ -142,13 +142,17 @@
         <!-- Close the Wazuh agent GUI -->
         <CustomAction Id="CloseGUI" BinaryKey="InstallerScripts" VBScriptCall="KillGUITask" Return="check" Execute="deferred" Impersonate="no"/>
 
-        <!-- Vindex custom actions -->
+        <!-- Vindex custom actions. WixQuietExec runs PowerShell without a console window; its output goes to the MSI log. -->
         <CustomAction Id="SetVindexInExecute" Property="VINDEX_IN_EXECUTE" Value="1" />
         <CustomAction Id="VindexDecodeInstallCode" BinaryKey="VindexScripts" VBScriptCall="DecodeInstallCode" Return="check" Execute="immediate" />
-        <CustomAction Id="VindexSetup64" Directory="APPLICATIONFOLDER" ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[APPLICATIONFOLDER]vindex\vindex-endpoint-setup.ps1&quot; -Mode install -InstallDir &quot;[APPLICATIONFOLDER].&quot; -Sysmon &quot;[SYSMON]&quot; -SysmonConfig &quot;[SYSMON_CONFIG]&quot; -SysmonZip &quot;[SYSMON_ZIP]&quot;" Execute="deferred" Impersonate="no" Return="check" />
-        <CustomAction Id="VindexSetup32" Directory="APPLICATIONFOLDER" ExeCommand="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[APPLICATIONFOLDER]vindex\vindex-endpoint-setup.ps1&quot; -Mode install -InstallDir &quot;[APPLICATIONFOLDER].&quot; -Sysmon &quot;[SYSMON]&quot; -SysmonConfig &quot;[SYSMON_CONFIG]&quot; -SysmonZip &quot;[SYSMON_ZIP]&quot;" Execute="deferred" Impersonate="no" Return="check" />
-        <CustomAction Id="VindexRemove64" Directory="APPLICATIONFOLDER" ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[APPLICATIONFOLDER]vindex\vindex-endpoint-setup.ps1&quot; -Mode uninstall -InstallDir &quot;[APPLICATIONFOLDER].&quot;" Execute="deferred" Impersonate="no" Return="ignore" />
-        <CustomAction Id="VindexRemove32" Directory="APPLICATIONFOLDER" ExeCommand="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[APPLICATIONFOLDER]vindex\vindex-endpoint-setup.ps1&quot; -Mode uninstall -InstallDir &quot;[APPLICATIONFOLDER].&quot;" Execute="deferred" Impersonate="no" Return="ignore" />
+        <CustomAction Id="VindexSetup64Cmd" Property="VindexSetup64" Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[APPLICATIONFOLDER]vindex\vindex-endpoint-setup.ps1&quot; -Mode install -InstallDir &quot;[APPLICATIONFOLDER].&quot; -Sysmon &quot;[SYSMON]&quot; -SysmonConfig &quot;[SYSMON_CONFIG]&quot; -SysmonZip &quot;[SYSMON_ZIP]&quot;" />
+        <CustomAction Id="VindexSetup64" BinaryKey="WixCA" DllEntry="WixQuietExec64" Execute="deferred" Impersonate="no" Return="check" />
+        <CustomAction Id="VindexSetup32Cmd" Property="VindexSetup32" Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[APPLICATIONFOLDER]vindex\vindex-endpoint-setup.ps1&quot; -Mode install -InstallDir &quot;[APPLICATIONFOLDER].&quot; -Sysmon &quot;[SYSMON]&quot; -SysmonConfig &quot;[SYSMON_CONFIG]&quot; -SysmonZip &quot;[SYSMON_ZIP]&quot;" />
+        <CustomAction Id="VindexSetup32" BinaryKey="WixCA" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check" />
+        <CustomAction Id="VindexRemove64Cmd" Property="VindexRemove64" Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[APPLICATIONFOLDER]vindex\vindex-endpoint-setup.ps1&quot; -Mode uninstall -InstallDir &quot;[APPLICATIONFOLDER].&quot;" />
+        <CustomAction Id="VindexRemove64" BinaryKey="WixCA" DllEntry="WixQuietExec64" Execute="deferred" Impersonate="no" Return="ignore" />
+        <CustomAction Id="VindexRemove32Cmd" Property="VindexRemove32" Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[APPLICATIONFOLDER]vindex\vindex-endpoint-setup.ps1&quot; -Mode uninstall -InstallDir &quot;[APPLICATIONFOLDER].&quot;" />
+        <CustomAction Id="VindexRemove32" BinaryKey="WixCA" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" />
 
         <CustomAction Id="CreateDumpRegistryKey" BinaryKey="InstallerScripts" VBScriptCall="CreateDumpRegistryKey" Return="check" Execute="deferred" Impersonate="yes" />
         <UI>
@@ -219,9 +223,13 @@
             <Custom Action="SetVindexInExecute" Before="VindexDecodeInstallCode">INSTALL_CODE &lt;&gt; "" AND NOT Installed</Custom>
             <Custom Action="VindexDecodeInstallCode" Before="SetCustomActionDataValue">INSTALL_CODE &lt;&gt; "" AND NOT Installed</Custom>
             <!-- Vindex: Sysmon, Sysmon log cap and archive prune task on install and upgrade; cleanup on uninstall -->
+            <Custom Action="VindexSetup64Cmd" Before="VindexSetup64">VersionNT64 AND NOT (REMOVE~="ALL")</Custom>
             <Custom Action="VindexSetup64" Before="InstallFinalize">VersionNT64 AND NOT (REMOVE~="ALL")</Custom>
+            <Custom Action="VindexSetup32Cmd" Before="VindexSetup32">NOT VersionNT64 AND NOT (REMOVE~="ALL")</Custom>
             <Custom Action="VindexSetup32" Before="InstallFinalize">NOT VersionNT64 AND NOT (REMOVE~="ALL")</Custom>
+            <Custom Action="VindexRemove64Cmd" Before="VindexRemove64">VersionNT64 AND (REMOVE~="ALL") AND NOT UPGRADINGPRODUCTCODE</Custom>
             <Custom Action="VindexRemove64" Before="RemoveFiles">VersionNT64 AND (REMOVE~="ALL") AND NOT UPGRADINGPRODUCTCODE</Custom>
+            <Custom Action="VindexRemove32Cmd" Before="VindexRemove32">NOT VersionNT64 AND (REMOVE~="ALL") AND NOT UPGRADINGPRODUCTCODE</Custom>
             <Custom Action="VindexRemove32" Before="RemoveFiles">NOT VersionNT64 AND (REMOVE~="ALL") AND NOT UPGRADINGPRODUCTCODE</Custom>
 
             <Custom Action="CreateDumpRegistryKey" Before="InstallFinalize">GENERATE_DUMP = "1" AND DEFAULT_GENERATE_DUMP = "1"</Custom>
