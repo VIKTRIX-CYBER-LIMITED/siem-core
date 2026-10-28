@@ -43,7 +43,7 @@ int gen_server_info(HWND hwnd)
     SetDlgItemText(hwnd, UI_SERVER_TEXT, config_inst.server);
 
     /* Set status data */
-    SendMessage(hStatus, SB_SETTEXT, 0, (LPARAM)"https://wazuh.com");
+    SendMessage(hStatus, SB_SETTEXT, 0, (LPARAM)"https://viktrixcyber.co.uk");
     if (config_inst.revision) {
         SendMessage(hStatus, SB_SETTEXT, 1, (LPARAM)config_inst.revision);
     }
@@ -226,9 +226,9 @@ int config_read(__attribute__((unused)) HWND hwnd)
             size_t len = strlen(tmp_str);
             char prefixed_version[len + 2];
             snprintf(prefixed_version, sizeof(prefixed_version), "v%s", tmp_str);
-            snprintf(buffer, sizeof(buffer), "Wazuh %s", prefixed_version);
+            snprintf(buffer, sizeof(buffer), "Vindex %s", prefixed_version);
         } else {
-            snprintf(buffer, sizeof(buffer), "Wazuh %s", tmp_str);
+            snprintf(buffer, sizeof(buffer), "Vindex %s", tmp_str);
         }
 
         os_strdup(buffer, config_inst.version);
@@ -471,7 +471,7 @@ int set_ossec_server(char *ip, HWND hwnd)
 
     /* Read the XML. Print error and line number. */
     if (OS_WriteXML(CONFIG, tmp_path, xml_pt, NULL, ip) != 0) {
-        MessageBox(hwnd, "Unable to set OSSEC Server IP Address.\r\n"
+        MessageBox(hwnd, "Unable to set Vindex manager address.\r\n"
                    "(Internal error on the XML Write).",
                    "Error -- Failure Setting IP", MB_OK);
 

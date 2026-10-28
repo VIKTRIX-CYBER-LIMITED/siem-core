@@ -1,0 +1,847 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Viktrix Sysmon baseline (schema 4.91, Sysmon 15.21). Product standard for Wazuh 4.14 Windows agents.
+
+  This endpoint installs as Sysmon64a.exe (renamed binary = service Sysmon64a).
+  Update (admin, same folder as the running exe):
+    Sysmon64a.exe -c sysmon-baseline.xml
+  Fresh install (only if uninstalled):
+    Sysmon64a.exe -accepteula -i sysmon-baseline.xml
+  Dump: Sysmon64a.exe -c
+  Do not use Sysmon64.exe against a Sysmon64a service: it will not replace this config.
+  Do not compose-recreate wazuh-manager for this. Sysmon is endpoint-side.
+
+  Two layers decide what the SOC sees. Sysmon decides what the endpoint
+  WRITES to its event log (this file). The Wazuh agent subscription
+  (shared/acme/agent.conf) decides what LEAVES the endpoint: as of
+  2026-10-04 it suppresses EID 2 and EID 3 entirely and EID 7 taskschd.dll
+  Valid loads. Events that leave but match no level-3+ rule are archived
+  (archives.json) and never reach Postgres; they are still the timeline
+  (process tree by ProcessGuid, writer of a file, pipe and registry
+  context). Level 0 is not waste. Each section below says what its events
+  are for: DETECT (a rule alerts), TIMELINE (level-0 context) or IDENTITY
+  (hash/signer evidence for the pipeline).
+
+  Measured 2026-10-04 00:00 to 10:35 UTC on agent 002 (archives.json, read-only;
+  40,531 Sysmon events in 10.6 h, 135 of them alerted):
+    EID 23  14,664  all level 0; Chrome/Codex/Slack/Claude/WhatsApp caches and
+                    the Comms POOM store. FileDelete COPIES every deleted file
+                    into the ArchiveDirectory (C:\viktrix-sysmon): 14.6k copies
+                    per 10 h with no cleanup. Broad delete logging moves to
+                    EID 26 (log only); EID 23 keeps the copy for executables,
+                    scripts, dumps, Startup and task files.
+    EID 17+18 10,121 all level 0; 10,042 were \LOCAL\mojo.N.N.N Chromium IPC
+                    (chrome, msedgewebview2, claude, msedge) matched by the
+                    "\mojo." include. Replaced with the two exact Cobalt Strike
+                    malleable "mojo.5688.8052.*" names.
+    EID 12+13 11,473 all level 0 except 6 (92307); Tcpip\Parameters CreateKey
+                    5,173, bam\State 2,900 (duplicates EID 1), W32Time
+                    SecureTimeLimits 1,290, ClipSVC\Parameters 570. Excluded by
+                    key and EventType; SetValue under Tcpip (NameServer) stays.
+    EID 1    2,352  23 alerted; 1,211 were chrome.exe spawning chrome.exe
+                    renderer/GPU children (the "type=" switch). Excluded by parent+image+
+                    switch so chrome.exe spawning cmd.exe still logs.
+    EID 10   1,226  86 alerted (92920 65, 92900 21); 781 svchost to lsass 0x1000.
+    EID 7      646  0 alerted; all SignatureStatus=Valid.
+    EID 29      14, EID 11 8, EID 5 16, EID 25 3, EID 15 1, EID 22 1.
+  Postgres, agent 002, 7 days to 2026-10-04: 617 Sysmon alerts, 108+39+34+15
+  paid classify calls on 100603/100720/100829/92900, 91+39+31+13 reviews.
+  None of those four is sensor noise: they are the rule/pipeline layer
+  (specs 237/248, issues #615, #616, #573).
+
+  Design (kept from the 2026-08-13 measurement: 3364/3370 EID10 alerts were
+  GrantedAccess=0x40 against Explorer from AppData\Programs\Antigravity IDE;
+  paolokappa Sysmon_Config_for_Wazuh included ALL ProcessAccess from \AppData\
+  then excluded named apps):
+
+    KEEP AppData for malware drop/run/load/network (EID 1/3/7/11/15/22/26/29).
+    FileCreate is AppData-wide for dropper types (exe/dll/script/masquerade)
+    plus any file in Startup, System32\Tasks and Office startup folders, and
+    PE-detected files regardless of extension (EID 29). Do NOT include
+    AppData-wide ProcessAccess. 0x40 against Explorer is PROCESS_DUP_HANDLE
+    (IDEs/shells), not T1055. Wazuh 92910/100604 fire on any Explorer EID10.
+    Never name an application at the sensor to remove noise the pipeline can
+    rule on deterministically (provenance claims, analyst rulings): excludes
+    here are OS mechanics (registry churn, browser self-spawn, cache deletes)
+    whose events carry no timeline value.
+
+  Identity evidence for the pipeline (#573, #613, A2/A5 writer hash):
+    EID 1 carries Hashes=SHA256 + ProcessGuid for every logged process.
+    EID 11/29 carry the writer's ProcessGuid: join to EID 1 ProcessGuid for
+    the writer hash. EID 10 SourceProcessGUID joins the same way.
+    EID 7 is the only event with Signature/SignatureStatus. This file logs
+    the main-image load of lsass, winlogon, services, csrss, Defender,
+    Sysmon64a, wazuh-agent and osqueryd (one event per process start) so
+    their signer+hash exist, and every non-Microsoft or non-Valid load INTO
+    lsass and the security tools (T1547.005 SSP/AP, T1556, T1574).
+
+  Sources (not copied wholesale):
+    Neo23x0/sysmon-config ProcessAccess LSASS masks + CallTrace UNKNOWN,
+      Cobalt Strike / Havoc / Impacket pipe names
+    olafhartong/sysmon-modular include_lsass_access, exclude_hklm_ccs_tcpip,
+      exclude_google_chrome pipes, include_windows_defender_tampering,
+      include_scheduled_tasks_path, include_lsass_dump_files
+    paolokappa Sysmon_Config_for_Wazuh (upstream of this file) for the
+      masquerade source dirs, comsvcs.dll, Defender policy keys
+    TrustedSec Sysmon Community Guide EID10 targeted includes
+    Microsoft Sysmon docs (conditions: is, is any, is not, contains,
+      contains any/all, excludes, excludes any/all, begin with, end with,
+      not begin with, not end with, image); EID 23 archive behaviour
+    Wazuh 4.14.6 ruleset 0595/0800/0810/0820/0830/0860/0870/0945/0950
+      (what analysisd alerts; EID 6, 9, 17-18, 25, 26 have no level-3+ rule)
+
+  Hash SHA256 only. MD5/SHA1 on this estate were a measured enrichment flood.
+  CheckRevocation is True: BYOVD drivers are typically signed with leaked or
+  revoked certificates; with revocation off they report Valid.
+-->
+<Sysmon schemaversion="4.91">
+  <HashAlgorithms>SHA256</HashAlgorithms>
+  <CheckRevocation>True</CheckRevocation>
+  <DnsLookup>False</DnsLookup>
+  <ArchiveDirectory>viktrix-sysmon</ArchiveDirectory>
+
+  <EventFiltering>
+
+    <!-- EID 1 ProcessCreate: DETECT + TIMELINE + IDENTITY (SHA256, ProcessGuid,
+         ParentProcessGuid). Log-most. Exclude only full System32 paths of
+         noisy Windows chores and a browser spawning its own renderer/GPU/
+         utility children (same binary as parent AND "- -type=" in the command
+         line; chrome.exe spawning cmd.exe still logs). A dropper named
+         CompatTelRunner.exe under AppData still logs. Wazuh 61603 is level 0;
+         92000-92081 fire on interpreters, encoded powershell, sdbinst, Office
+         -> mshta, renamed wscript, cmd from abnormal parent (92052).
+         xtacse/xtac64se are the ARM64 x86/x64 emulation compilers (89 per
+         10 h, no arguments of interest).
+         DllHost COM surrogates log (#860, spec 1016): no DllHost exclusion,
+         so every EID 25/7 of a dllhost joins its own birth (hash, parent,
+         /Processid AppID). Measured 2026-09-01..10-19 on agent 002: no AppID
+         above ~1.3 launches/day, ~8 to 30 extra EID 1/day in all. A future
+         exclusion of one AppID must be an AND rule binding Image is
+         C:\Windows\System32\dllhost.exe, ParentImage is svchost.exe and the
+         exact CommandLine; a command line alone is spoofable by any image. -->
+    <RuleGroup groupRelation="or">
+      <ProcessCreate onmatch="exclude">
+        <Image condition="is">C:\Windows\System32\CompatTelRunner.exe</Image>
+        <Image condition="is">C:\Windows\System32\DeviceCensus.exe</Image>
+        <Image condition="is">C:\Windows\System32\SearchIndexer.exe</Image>
+        <Image condition="is">C:\Windows\System32\SearchProtocolHost.exe</Image>
+        <Image condition="is">C:\Windows\System32\SearchFilterHost.exe</Image>
+        <Image condition="is">C:\Windows\System32\MoUsoCoreWorker.exe</Image>
+        <Image condition="is">C:\Windows\System32\UsoClient.exe</Image>
+        <Image condition="is">C:\Windows\System32\MusNotification.exe</Image>
+        <Image condition="is">C:\Windows\System32\MusNotificationUx.exe</Image>
+        <Image condition="is">C:\Windows\System32\audiodg.exe</Image>
+        <Image condition="is">C:\Windows\System32\fontdrvhost.exe</Image>
+        <Image condition="is">C:\Windows\System32\dwm.exe</Image>
+        <Image condition="is">C:\Windows\System32\conhost.exe</Image>
+        <Image condition="is">C:\Windows\System32\FontCache.exe</Image>
+        <Image condition="is">C:\Windows\System32\sppsvc.exe</Image>
+        <Image condition="is">C:\Windows\System32\SgrmBroker.exe</Image>
+        <Image condition="is">C:\Windows\System32\WmiApSrv.exe</Image>
+        <Image condition="is">C:\Windows\System32\ctfmon.exe</Image>
+        <Image condition="is">C:\Windows\System32\xtacse.exe</Image>
+        <Image condition="is">C:\Windows\System32\xtac64se.exe</Image>
+        <CommandLine condition="is">C:\Windows\system32\wermgr.exe -upload</CommandLine>
+        <Rule groupRelation="and">
+          <Image condition="is">C:\Program Files\Google\Chrome\Application\chrome.exe</Image>
+          <ParentImage condition="is">C:\Program Files\Google\Chrome\Application\chrome.exe</ParentImage>
+          <CommandLine condition="contains">-type=</CommandLine>
+        </Rule>
+        <Rule groupRelation="and">
+          <Image condition="is">C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe</Image>
+          <ParentImage condition="is">C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe</ParentImage>
+          <CommandLine condition="contains">-type=</CommandLine>
+        </Rule>
+        <Rule groupRelation="and">
+          <Image condition="begin with">C:\Program Files (x86)\Microsoft\EdgeWebView\Application\</Image>
+          <Image condition="end with">\msedgewebview2.exe</Image>
+          <ParentImage condition="begin with">C:\Program Files (x86)\Microsoft\EdgeWebView\Application\</ParentImage>
+          <ParentImage condition="end with">\msedgewebview2.exe</ParentImage>
+          <CommandLine condition="contains">-type=</CommandLine>
+        </Rule>
+      </ProcessCreate>
+    </RuleGroup>
+
+    <!-- EID 2 timestomp: TIMELINE. Include user-writable + Windows. NOTE: the
+         acme agent.conf suppresses EID 2 at the subscription (2026-10-04), so
+         these events exist only in the local event log until that changes. -->
+    <RuleGroup groupRelation="or">
+      <FileCreateTime onmatch="include">
+        <TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\System32\;\Windows\SysWOW64\;\Windows\Tasks\</TargetFilename>
+      </FileCreateTime>
+    </RuleGroup>
+    <RuleGroup groupRelation="or">
+      <FileCreateTime onmatch="exclude">
+        <Image condition="end with">\msiexec.exe</Image>
+        <Image condition="is">C:\Windows\System32\svchost.exe</Image>
+      </FileCreateTime>
+    </RuleGroup>
+
+    <!-- EID 3 NetworkConnect: TIMELINE (would be DETECT via 92101-92110 and
+         61605). LOLBins + anything running from user-writable paths (AppData
+         malware C2) + Office + lateral-movement ports. Not every Chrome/Edge
+         lookup. NOTE: the acme agent.conf suppresses EID 3 at the subscription
+         and local rule 61605 is level 0 (owner 2026-09-01), so the pipeline has
+         no process-to-destination telemetry from 002 today; the sensor keeps
+         emitting locally so an on-endpoint timeline still has it. Lifting the
+         suppression is an agent.conf decision, not a sensor one. -->
+    <RuleGroup groupRelation="or">
+      <NetworkConnect onmatch="include">
+        <Image name="technique_id=T1059.001,technique_name=PowerShell" condition="end with">\powershell.exe</Image>
+        <Image condition="end with">\pwsh.exe</Image>
+        <Image name="technique_id=T1059.003,technique_name=Windows Command Shell" condition="end with">\cmd.exe</Image>
+        <Image name="technique_id=T1218.005,technique_name=Mshta" condition="end with">\mshta.exe</Image>
+        <Image name="technique_id=T1218.010,technique_name=Regsvr32" condition="end with">\regsvr32.exe</Image>
+        <Image name="technique_id=T1218.011,technique_name=Rundll32" condition="end with">\rundll32.exe</Image>
+        <Image name="technique_id=T1059.005,technique_name=Visual Basic" condition="end with">\wscript.exe</Image>
+        <Image condition="end with">\cscript.exe</Image>
+        <Image name="technique_id=T1140,technique_name=Certutil" condition="end with">\certutil.exe</Image>
+        <Image name="technique_id=T1197,technique_name=BITS Jobs" condition="end with">\bitsadmin.exe</Image>
+        <Image name="technique_id=T1047,technique_name=WMI" condition="end with">\wmic.exe</Image>
+        <Image condition="end with">\wmiprvse.exe</Image>
+        <Image condition="end with">\msiexec.exe</Image>
+        <Image condition="end with">\cmstp.exe</Image>
+        <Image condition="end with">\installutil.exe</Image>
+        <Image condition="end with">\msbuild.exe</Image>
+        <Image condition="end with">\ieexec.exe</Image>
+        <Image condition="end with">\forfiles.exe</Image>
+        <Image condition="end with">\pcalua.exe</Image>
+        <Image condition="end with">\hh.exe</Image>
+        <Image condition="end with">\curl.exe</Image>
+        <Image condition="end with">\wget.exe</Image>
+        <Image condition="image">python.exe</Image>
+        <Image condition="image">pythonw.exe</Image>
+        <Image condition="image">wsl.exe</Image>
+        <Image condition="image">bash.exe</Image>
+        <Image condition="end with">\winword.exe</Image>
+        <Image condition="end with">\excel.exe</Image>
+        <Image condition="end with">\powerpnt.exe</Image>
+        <Image condition="end with">\outlook.exe</Image>
+        <Image condition="end with">\eqnedt32.exe</Image>
+        <DestinationPort name="technique_id=T1021.001,technique_name=RDP" condition="is">3389</DestinationPort>
+        <DestinationPort name="technique_id=T1021.002,technique_name=SMB" condition="is">445</DestinationPort>
+        <DestinationPort name="technique_id=T1021.006,technique_name=WinRM" condition="is">5985</DestinationPort>
+        <DestinationPort condition="is">5986</DestinationPort>
+        <Image condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\</Image>
+      </NetworkConnect>
+    </RuleGroup>
+
+    <!-- EID 5: TIMELINE. Terminate of LOLBins / user-writable (closes the
+         process-tree interval for the timeline). -->
+    <RuleGroup groupRelation="or">
+      <ProcessTerminate onmatch="include">
+        <Image condition="end with">\powershell.exe</Image>
+        <Image condition="end with">\pwsh.exe</Image>
+        <Image condition="end with">\cmd.exe</Image>
+        <Image condition="end with">\mshta.exe</Image>
+        <Image condition="end with">\wscript.exe</Image>
+        <Image condition="end with">\cscript.exe</Image>
+        <Image condition="end with">\rundll32.exe</Image>
+        <Image condition="end with">\regsvr32.exe</Image>
+        <Image condition="contains any">\AppData\;\Temp\;\Users\Public\</Image>
+      </ProcessTerminate>
+    </RuleGroup>
+
+    <!-- EID 6 DriverLoad: DETECT (BYOVD, T1068/T1014/T1562.001) + IDENTITY.
+         Previously excluded any Signature containing "Microsoft" or "Windows",
+         which hid EVERY third-party WHQL driver: those are signed "Microsoft
+         Windows Hardware Compatibility Publisher", the exact signer of the
+         vulnerable drivers BYOVD loads. Now only inbox Microsoft signers with
+         a Valid (revocation-checked) status are excluded. Expected volume: a
+         few dozen at boot (Qualcomm/ASUS drivers on this ARM64 laptop), then
+         near zero. Wazuh 61608 is level 0: a rule is proposed (report). -->
+    <RuleGroup groupRelation="or">
+      <DriverLoad onmatch="exclude">
+        <Rule groupRelation="and">
+          <Signature condition="is any">Microsoft Windows;Microsoft Windows Publisher;Microsoft Corporation</Signature>
+          <SignatureStatus condition="is">Valid</SignatureStatus>
+        </Rule>
+      </DriverLoad>
+    </RuleGroup>
+
+    <!-- EID 7 ImageLoad: DETECT + IDENTITY. AppData/Temp DLL loads (drop-and-
+         load, Electron IDE side-loading: a Wazuh child can filter on
+         signatureStatus), the Wazuh 0820 detections (unmanaged PowerShell,
+         PrintNightmare, VaultCli, Office VBE, taskschd from LOLBins), and new:
+           - any non-Valid or non-Microsoft load INTO lsass (T1547.005 SSP/AP,
+             T1556.002 password filter, T1003 in-process dumpers);
+           - any non-Valid load into winlogon/services/spoolsv/svchost and the
+             security tools (T1574 service DLL hijack, T1562 tamper);
+           - comsvcs.dll loaded by a LOLBin (T1003.001 MiniDump via rundll32);
+           - the main-image load of the protected/security processes, one
+             event per process start, so Signature+Hashes exist for #573/#613
+             (lsass, csrss, winlogon, services, MsMpEng, NisSrv,
+             MpDefenderCoreService, Sysmon64a, wazuh-agent, osqueryd).
+         Do not log every Valid taskschd.dll (92154 flood; agent.conf also
+         suppresses it). -->
+    <RuleGroup groupRelation="or">
+      <ImageLoad onmatch="include">
+        <ImageLoaded condition="contains any">\AppData\;\Temp\;\Users\Public\;\Downloads\;\ProgramData\</ImageLoaded>
+        <OriginalFileName name="technique_id=T1059.001,technique_name=PowerShell" condition="is">System.Management.Automation.dll</OriginalFileName>
+        <OriginalFileName condition="is">System.Management.Automation.ni.dll</OriginalFileName>
+        <Rule groupRelation="and">
+          <ImageLoaded name="technique_id=T1555,technique_name=Credentials from Password Stores" condition="end with">\vaultcli.dll</ImageLoaded>
+          <Image condition="contains any">mshta.exe;wscript.exe;cscript.exe;rundll32.exe;regsvr32.exe;powershell.exe;pwsh.exe;cmd.exe;cmstp.exe</Image>
+        </Rule>
+        <Rule groupRelation="and">
+          <ImageLoaded name="technique_id=T1555,technique_name=Credentials from Password Stores" condition="end with">\vaultcli.dll</ImageLoaded>
+          <SignatureStatus condition="is not">Valid</SignatureStatus>
+        </Rule>
+        <Rule groupRelation="and">
+          <ImageLoaded name="technique_id=T1555,technique_name=Credentials from Password Stores" condition="end with">\vaultcli.dll</ImageLoaded>
+          <ImageLoaded condition="is not">C:\Windows\System32\vaultcli.dll</ImageLoaded>
+        </Rule>
+        <Rule groupRelation="and">
+          <ImageLoaded name="technique_id=T1555,technique_name=Credentials from Password Stores" condition="end with">\vaultcli.dll</ImageLoaded>
+          <SignatureStatus condition="is">Valid</SignatureStatus>
+          <Signature condition="is not">Microsoft Windows</Signature>
+        </Rule>
+        <ImageLoaded name="technique_id=T1210,technique_name=PrintNightmare" condition="contains">\spool\drivers\</ImageLoaded>
+        <OriginalFileName name="technique_id=T1059.005,technique_name=VBA" condition="is">VBEUI.DLL</OriginalFileName>
+        <ImageLoaded condition="end with">\amsi.dll</ImageLoaded>
+        <ImageLoaded condition="end with">\wldp.dll</ImageLoaded>
+        <ImageLoaded condition="end with">\clr.dll</ImageLoaded>
+        <Rule groupRelation="and">
+          <ImageLoaded condition="end with">\taskschd.dll</ImageLoaded>
+          <Image condition="contains any">mshta.exe;wscript.exe;cscript.exe;rundll32.exe;regsvr32.exe;powershell.exe;pwsh.exe;cmd.exe;cmstp.exe</Image>
+        </Rule>
+        <Rule groupRelation="and">
+          <ImageLoaded condition="end with">\taskschd.dll</ImageLoaded>
+          <SignatureStatus condition="is not">Valid</SignatureStatus>
+        </Rule>
+        <Rule groupRelation="and">
+          <ImageLoaded name="technique_id=T1003.001,technique_name=LSASS Memory via comsvcs MiniDump" condition="end with">\comsvcs.dll</ImageLoaded>
+          <Image condition="contains any">rundll32.exe;powershell.exe;pwsh.exe;cmd.exe;wscript.exe;cscript.exe;mshta.exe;regsvr32.exe</Image>
+        </Rule>
+        <Rule groupRelation="and">
+          <Image name="technique_id=T1547.005,technique_name=Security Support Provider" condition="is">C:\Windows\system32\lsass.exe</Image>
+          <SignatureStatus condition="is not">Valid</SignatureStatus>
+        </Rule>
+        <Rule groupRelation="and">
+          <Image name="technique_id=T1547.005,technique_name=Security Support Provider" condition="is">C:\Windows\system32\lsass.exe</Image>
+          <Signature condition="excludes">Microsoft</Signature>
+        </Rule>
+        <Rule groupRelation="and">
+          <Image name="technique_id=T1574.002,technique_name=DLL Side-Loading into system or security process" condition="contains any">\winlogon.exe;\services.exe;\spoolsv.exe;\svchost.exe;\MsMpEng.exe;\NisSrv.exe;\MpDefenderCoreService.exe;\Sysmon64a.exe;\wazuh-agent.exe;\osqueryd.exe</Image>
+          <SignatureStatus condition="is not">Valid</SignatureStatus>
+        </Rule>
+        <ImageLoaded name="technique_id=T1036,technique_name=Image identity of protected and security processes" condition="contains any">\lsass.exe;\csrss.exe;\winlogon.exe;\services.exe;\MsMpEng.exe;\NisSrv.exe;\MpDefenderCoreService.exe;\Sysmon64a.exe;\wazuh-agent.exe;\osqueryd.exe</ImageLoaded>
+      </ImageLoad>
+    </RuleGroup>
+
+    <!-- EID 8 CreateRemoteThread: DETECT (real T1055, Wazuh 92400-92403).
+         Exclude only csrss/smss/wininit (OS thread injection into every
+         process). AppData sources are included by the default. -->
+    <RuleGroup groupRelation="or">
+      <CreateRemoteThread onmatch="exclude">
+        <SourceImage condition="is">C:\Windows\System32\csrss.exe</SourceImage>
+        <SourceImage condition="is">C:\Windows\System32\smss.exe</SourceImage>
+        <SourceImage condition="is">C:\Windows\System32\wininit.exe</SourceImage>
+      </CreateRemoteThread>
+    </RuleGroup>
+
+    <!-- EID 9 raw disk: DETECT (T1003.002/.003 SAM/NTDS via \\.\ , T1006).
+         Rare; include all. Wazuh 61611 is level 0: rule proposed. -->
+    <RuleGroup groupRelation="or">
+      <RawAccessRead onmatch="include" />
+    </RuleGroup>
+
+    <!-- EID 10 ProcessAccess: DETECT. Targeted include. LSASS dump masks
+         (Wazuh 92900 matches 0x1010|0x40 on lsass; the regex is unanchored and
+         Sysmon "contains any" is a substring match, so Defender's 0x101000
+         [SYNCHRONIZE|QUERY_LIMITED, cannot read memory] passes both layers:
+         21/day, 15 paid calls and 31 reviews per week. That is issue #615's
+         level-1 child, deliberately not a sensor exclude: naming MsMpEng here
+         would be an app allowlist and lose the Defender-scanned-lsass timeline
+         point). Injection/hollowing masks on any target. Explorer/mstsc ONLY
+         with write/thread/all-access, not 0x40. CallTrace UNKNOWN / dbghelp =
+         Cobalt Strike BOF / MiniDump. Sources running from masquerade
+         directories (Public, PerfLogs, Tasks, Windows\Temp) on any target.
+         NO SourceImage contains \AppData\ include (header). -->
+    <RuleGroup groupRelation="or">
+      <ProcessAccess onmatch="include">
+        <CallTrace name="technique_id=T1003,technique_name=Credential Dumping" condition="contains">dbghelp.dll</CallTrace>
+        <CallTrace condition="contains">dbgcore.dll</CallTrace>
+        <CallTrace name="technique_id=T1106,technique_name=Native API" condition="begin with">UNKNOWN</CallTrace>
+        <GrantedAccess name="technique_id=T1055,technique_name=Process Injection">0x0820</GrantedAccess>
+        <GrantedAccess>0x820</GrantedAccess>
+        <GrantedAccess name="technique_id=T1055.012,technique_name=Process Hollowing">0x0800</GrantedAccess>
+        <GrantedAccess>0x800</GrantedAccess>
+        <GrantedAccess name="technique_id=T1003,technique_name=Credential Dumping">0x0810</GrantedAccess>
+        <GrantedAccess>0x810</GrantedAccess>
+        <SourceImage name="technique_id=T1036,technique_name=Masquerading" condition="contains any">:\Users\Public\;:\PerfLogs\;:\Windows\Tasks\;:\Windows\System32\Tasks\;:\Windows\Temp\</SourceImage>
+        <Rule groupRelation="and">
+          <TargetImage name="technique_id=T1003.001,technique_name=LSASS Memory" condition="end with">\lsass.exe</TargetImage>
+          <GrantedAccess condition="contains any">0x40;0x1000;0x1010;0x1038;0x1410;0x1418;0x1438;0x143a;0x100000;0x1f0fff;0x1f1fff;0x1f2fff;0x1f3fff;0x1fffff</GrantedAccess>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetImage condition="end with">\lsass.exe</TargetImage>
+          <SourceImage condition="image">wsmprovhost.exe</SourceImage>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetImage condition="end with">\csrss.exe</TargetImage>
+          <GrantedAccess>0x1F1FFF</GrantedAccess>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetImage condition="end with">\winlogon.exe</TargetImage>
+          <GrantedAccess>0x1F1FFF</GrantedAccess>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetImage condition="end with">\wininit.exe</TargetImage>
+          <GrantedAccess>0x1F1FFF</GrantedAccess>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetImage condition="end with">\services.exe</TargetImage>
+          <GrantedAccess>0x1F1FFF</GrantedAccess>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetImage name="technique_id=T1055,technique_name=Process Injection" condition="end with">\explorer.exe</TargetImage>
+          <GrantedAccess condition="contains any">0x0820;0x820;0x0800;0x800;0x0810;0x810;0x1fffff;0x1f1fff;0x1f0fff;0x1438;0x143a;0x1418</GrantedAccess>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetImage condition="end with">\mstsc.exe</TargetImage>
+          <GrantedAccess condition="contains any">0x0820;0x820;0x0800;0x800;0x1fffff;0x1f1fff</GrantedAccess>
+        </Rule>
+        <Rule groupRelation="and">
+          <SourceImage condition="end with">\WerFaultSecure.exe</SourceImage>
+          <TargetImage condition="end with">\MsMpEng.exe</TargetImage>
+        </Rule>
+        <Rule groupRelation="and">
+          <SourceImage condition="contains">\Microsoft Office\</SourceImage>
+          <CallTrace condition="contains">\Microsoft Shared\VBA</CallTrace>
+        </Rule>
+      </ProcessAccess>
+    </RuleGroup>
+
+    <!-- EID 11 FileCreate: DETECT + TIMELINE (writer ProcessGuid). AppData-wide
+         drop sensor. Path AND end-with extension (not contains: .com must not
+         match .component). Bare end-with .exe would log every installer.
+         Startup, System32\Tasks (T1053.005 task XML), Windows\Tasks and the
+         Office startup/add-in folders (T1137) log ANY file. lsass*.dmp
+         anywhere (T1003.001). PowerShell profile scripts (T1546.013).
+         Wazuh 92200-92227, 92213 (local 100603). No stock rule matches a
+         System32\Tasks drop: rule proposed (report). -->
+    <RuleGroup groupRelation="or">
+      <FileCreate onmatch="include">
+        <TargetFilename name="technique_id=T1547.001,technique_name=Startup Folder" condition="contains">\Start Menu\Programs\Startup\</TargetFilename>
+        <TargetFilename name="technique_id=T1053.005,technique_name=Scheduled Task" condition="begin with">C:\Windows\System32\Tasks\</TargetFilename>
+        <TargetFilename name="technique_id=T1053.005,technique_name=Scheduled Task" condition="begin with">C:\Windows\Tasks\</TargetFilename>
+        <TargetFilename name="technique_id=T1137,technique_name=Office Application Startup" condition="contains any">\Microsoft\Word\STARTUP\;\Microsoft\Excel\XLSTART\;\Microsoft\AddIns\;\Microsoft\Outlook\VbaProject.OTM;\Microsoft\Templates\Normal.dotm</TargetFilename>
+        <Rule groupRelation="and">
+          <TargetFilename name="technique_id=T1003.001,technique_name=LSASS Memory" condition="contains">lsass</TargetFilename>
+          <TargetFilename condition="end with">.dmp</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename name="technique_id=T1546.013,technique_name=PowerShell Profile" condition="contains">\WindowsPowerShell\</TargetFilename>
+          <TargetFilename condition="end with">.ps1</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename name="technique_id=T1105,technique_name=Ingress Tool Transfer" condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\System32\;\Windows\SysWOW64\;\Windows\Tasks\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.exe</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\System32\;\Windows\SysWOW64\;\Windows\Tasks\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.dll</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\System32\;\Windows\SysWOW64\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.sys</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.scr</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.pif</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.com</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.cpl</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.ps1</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.psm1</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.js</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.jse</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.vbs</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.vbe</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.wsf</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.wsh</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.hta</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.bat</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.cmd</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.lnk</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.msi</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.iso</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.img</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.reg</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.pfx</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.dmp</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename name="technique_id=T1137.006,technique_name=Office Add-ins" condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.xll</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.wll</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename name="technique_id=T1218.010,technique_name=Regsvr32 scriptlet" condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.sct</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.chm</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.url</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.settingcontent-ms</TargetFilename>
+        </Rule>
+      </FileCreate>
+    </RuleGroup>
+    <RuleGroup groupRelation="or">
+      <FileCreate onmatch="exclude">
+        <TargetFilename condition="begin with">C:\Windows\SoftwareDistribution\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Windows\WinSxS\</TargetFilename>
+        <TargetFilename condition="contains">\Microsoft\Windows\INetCache\</TargetFilename>
+        <TargetFilename condition="contains">\Microsoft\Windows\WebCache\</TargetFilename>
+      </FileCreate>
+    </RuleGroup>
+
+    <!-- EID 12-14 Registry: DETECT (Wazuh 92300-92309) + TIMELINE. Persistence
+         / UAC bypass / services / COM / LSA packages / Defender tamper /
+         scheduled task cache / RDP enablement / netsh helpers and portproxy.
+         The exclude set removes OS mechanics measured at 10,400 of 11,648
+         events per 10 h with no timeline value (CreateKey on an existing key,
+         BAM execution stamps that duplicate EID 1, W32Time secure-time
+         counters, ClipSVC licensing, VSS diagnostics, Bluetooth/device
+         association state). SetValue under Tcpip\Parameters (NameServer,
+         T1557) still logs: the Tcpip exclude is CreateKey only. -->
+    <RuleGroup groupRelation="or">
+      <RegistryEvent onmatch="include">
+        <TargetObject name="technique_id=T1547.001,technique_name=Registry Run Keys" condition="contains any">\CurrentVersion\Run;\CurrentVersion\RunOnce;\CurrentVersion\RunOnceEx;\CurrentVersion\RunServices;\CurrentVersion\Policies\Explorer\Run</TargetObject>
+        <TargetObject name="technique_id=T1547.004,technique_name=Winlogon Helper" condition="contains">\Winlogon\</TargetObject>
+        <TargetObject name="technique_id=T1546.008,technique_name=Accessibility Features" condition="contains">\Image File Execution Options\</TargetObject>
+        <TargetObject name="technique_id=T1546.010,technique_name=AppInit DLLs" condition="contains any">\AppInit_DLLs;\AppCertDlls</TargetObject>
+        <TargetObject name="technique_id=T1543.003,technique_name=Windows Service" condition="contains">\Services\</TargetObject>
+        <TargetObject name="technique_id=T1546.015,technique_name=COM Hijacking" condition="contains">\InprocServer32</TargetObject>
+        <TargetObject name="technique_id=T1548.002,technique_name=UAC Bypass" condition="contains any">\ms-settings;\mscfile;\exefile;\ms-settings\shell\open\command;\Environment\windir</TargetObject>
+        <TargetObject condition="contains">\Policies\System\EnableLUA</TargetObject>
+        <TargetObject condition="contains">\Policies\System\ConsentPromptBehaviorAdmin</TargetObject>
+        <TargetObject name="technique_id=T1112,technique_name=Modify Registry" condition="contains any">\Safeboot;\DisableCMD;\DisableTaskMgr;\DisableRegistryTools</TargetObject>
+        <TargetObject name="technique_id=T1003,technique_name=Credential Dumping" condition="contains">\Control\SecurityProviders\</TargetObject>
+        <TargetObject name="technique_id=T1547.005,technique_name=Security Support Provider" condition="contains">\Lsa\</TargetObject>
+        <TargetObject condition="contains">\SilentProcessExit\</TargetObject>
+        <TargetObject condition="contains">\Notify\</TargetObject>
+        <TargetObject condition="contains">\Print\Monitors\</TargetObject>
+        <TargetObject condition="contains">\Windows\CurrentVersion\Explorer\User Shell Folders</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\Explorer\Shell Folders</TargetObject>
+        <TargetObject name="technique_id=T1546,technique_name=Shell extension persistence" condition="contains any">\Explorer\ShellExecuteHooks;\Explorer\ShellServiceObjectDelayLoad;\Explorer\Browser Helper Objects</TargetObject>
+        <TargetObject name="technique_id=T1562.001,technique_name=Disable or Modify Tools (Defender)" condition="contains any">\Windows Defender\Exclusions\;\Windows Defender\Real-Time Protection\;\Windows Defender\Features\;\Windows Defender\DisableAntiSpyware;\Windows Defender\DisableAntiVirus;\Windows Defender\Spynet\;\Microsoft Antimalware\Exclusions\</TargetObject>
+        <TargetObject name="technique_id=T1562.002,technique_name=Disable Windows Event Logging" condition="contains any">\Policies\Microsoft\Windows\PowerShell\;\Policies\Microsoft\Windows\EventLog\</TargetObject>
+        <TargetObject name="technique_id=T1053.005,technique_name=Scheduled Task" condition="contains">\Schedule\TaskCache\Tree\</TargetObject>
+        <TargetObject name="technique_id=T1021.001,technique_name=RDP enablement" condition="contains any">\Terminal Server\fDenyTSConnections;\Terminal Server\WinStations\RDP-Tcp\PortNumber;\Terminal Server\WinStations\RDP-Tcp\UserAuthentication</TargetObject>
+        <TargetObject name="technique_id=T1546.007,technique_name=Netsh Helper DLL" condition="contains">\SOFTWARE\Microsoft\NetSh</TargetObject>
+        <TargetObject name="technique_id=T1090,technique_name=Netsh portproxy" condition="contains">\Services\PortProxy\</TargetObject>
+        <TargetObject name="technique_id=T1556,technique_name=Credential Provider" condition="contains">\Authentication\Credential Providers\</TargetObject>
+        <TargetObject condition="contains">\AppData\</TargetObject>
+      </RegistryEvent>
+    </RuleGroup>
+    <RuleGroup groupRelation="or">
+      <RegistryEvent onmatch="exclude">
+        <TargetObject condition="contains">\InventoryApplicationFile\</TargetObject>
+        <Image condition="is">C:\Windows\System32\poqexec.exe</Image>
+        <Rule groupRelation="and">
+          <EventType condition="is">CreateKey</EventType>
+          <TargetObject condition="begin with">HKLM\System\CurrentControlSet\Services\Tcpip\Parameters</TargetObject>
+        </Rule>
+        <Rule groupRelation="and">
+          <EventType condition="is">CreateKey</EventType>
+          <TargetObject condition="begin with">HKLM\System\CurrentControlSet\Services\ClipSVC\Parameters</TargetObject>
+        </Rule>
+        <Rule groupRelation="and">
+          <EventType condition="is">CreateKey</EventType>
+          <TargetObject condition="is">HKLM\System\CurrentControlSet\Services\VSS</TargetObject>
+        </Rule>
+        <TargetObject condition="contains">\Services\bam\State\UserSettings\</TargetObject>
+        <TargetObject condition="contains">\Services\W32Time\SecureTimeLimits</TargetObject>
+        <TargetObject condition="contains">\Services\VSS\Diag</TargetObject>
+        <TargetObject condition="contains">\Services\DeviceAssociationService\State\Store\</TargetObject>
+        <TargetObject condition="contains">\Services\DisplayEnhancementService\State\</TargetObject>
+        <TargetObject condition="contains">\Services\BTHPORT\Parameters\Devices\</TargetObject>
+      </RegistryEvent>
+    </RuleGroup>
+
+    <!-- EID 15 ADS / MOTW: TIMELINE (download origin of a dropped file). -->
+    <RuleGroup groupRelation="or">
+      <FileCreateStreamHash onmatch="include">
+        <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\</TargetFilename>
+        <TargetFilename condition="contains">:Zone.Identifier</TargetFilename>
+      </FileCreateStreamHash>
+    </RuleGroup>
+
+    <!-- EID 17-18 named pipes: DETECT-grade shapes only (no level-3+ Wazuh rule
+         exists yet; rule proposed). Cobalt Strike (MSSE-, postex_, status_,
+         msagent_, the two exact "mojo.5688.8052.*" malleable names), Havoc
+         (demon_pipe), Covenant (gruntsvc), Metasploit (msf-pipe), Impacket /
+         PsExec / PAExec / RemCom service pipes, lsadump/cachedump/wce, remote
+         SCM/at/registry endpoints (svcctl, atsvc, winreg: lateral movement
+         into this host), plus any pipe from user-writable or masquerade
+         image paths and from LOLBins. The previous "\mojo." include matched
+         Chromium's \LOCAL\mojo.N.N.N IPC: 10,042 of 10,121 pipe events per
+         10 h, all chrome/webview/claude/edge, zero timeline value. -->
+    <RuleGroup groupRelation="or">
+      <PipeEvent onmatch="include">
+        <PipeName name="technique_id=T1055,technique_name=Cobalt Strike default pipes" condition="contains any">\MSSE-;\msagent_;\postex_;\status_;\msdt;\PSEXESVC;\paexec;\remcom;\csexec;\ntsvcs;\scerpc</PipeName>
+        <PipeName name="technique_id=T1003,technique_name=Credential dumper pipes" condition="contains any">\lsadump;\cachedump;\wceservicepipe</PipeName>
+        <PipeName name="technique_id=T1055,technique_name=C2 malleable and framework pipes" condition="begin with">\mojo.5688.8052.183894939787088877</PipeName>
+        <PipeName condition="begin with">\mojo.5688.8052.35780273329370473</PipeName>
+        <PipeName condition="begin with">\demon_pipe</PipeName>
+        <PipeName condition="begin with">\gruntsvc</PipeName>
+        <PipeName condition="begin with">\msf-pipe</PipeName>
+        <PipeName condition="begin with">\DserNamePipe</PipeName>
+        <PipeName condition="begin with">\interprocess_</PipeName>
+        <PipeName condition="begin with">\samr_</PipeName>
+        <PipeName condition="begin with">\netlogon_</PipeName>
+        <PipeName condition="begin with">\srvsvc_</PipeName>
+        <PipeName condition="begin with">\lsarpc_</PipeName>
+        <PipeName condition="begin with">\win_svc</PipeName>
+        <PipeName condition="begin with">\windows.update.manager</PipeName>
+        <PipeName name="technique_id=T1021.002,technique_name=Remote service / task / registry endpoints" condition="begin with">\svcctl</PipeName>
+        <PipeName condition="begin with">\atsvc</PipeName>
+        <PipeName condition="begin with">\winreg</PipeName>
+        <Image condition="contains any">\AppData\;\Temp\;\Users\Public\;:\PerfLogs\;:\Windows\Tasks\;:\Windows\System32\Tasks\</Image>
+        <Image condition="end with">\powershell.exe</Image>
+        <Image condition="end with">\pwsh.exe</Image>
+        <Image condition="end with">\cmd.exe</Image>
+        <Image condition="end with">\rundll32.exe</Image>
+        <Image condition="end with">\regsvr32.exe</Image>
+        <Image condition="end with">\wscript.exe</Image>
+        <Image condition="end with">\cscript.exe</Image>
+        <Image condition="end with">\mshta.exe</Image>
+      </PipeEvent>
+    </RuleGroup>
+
+    <!-- EID 19-21 WMI persistence: DETECT (Wazuh 89501/89502). Low volume;
+         include all. -->
+    <RuleGroup groupRelation="or">
+      <WmiEvent onmatch="include" />
+    </RuleGroup>
+
+    <!-- EID 22 DNS: TIMELINE (name a suspicious image resolved; 61617 level 0).
+         LOLBins + user-writable images. Not the whole browser resolver table. -->
+    <RuleGroup groupRelation="or">
+      <DnsQuery onmatch="include">
+        <Image condition="end with">\powershell.exe</Image>
+        <Image condition="end with">\pwsh.exe</Image>
+        <Image condition="end with">\cmd.exe</Image>
+        <Image condition="end with">\mshta.exe</Image>
+        <Image condition="end with">\wscript.exe</Image>
+        <Image condition="end with">\cscript.exe</Image>
+        <Image condition="end with">\rundll32.exe</Image>
+        <Image condition="end with">\regsvr32.exe</Image>
+        <Image condition="end with">\certutil.exe</Image>
+        <Image condition="end with">\bitsadmin.exe</Image>
+        <Image condition="end with">\curl.exe</Image>
+        <Image condition="end with">\msiexec.exe</Image>
+        <Image condition="image">python.exe</Image>
+        <Image condition="image">wsl.exe</Image>
+        <Image condition="contains any">\AppData\;\Temp\;\Users\Public\;\Downloads\;:\PerfLogs\;:\Windows\Tasks\</Image>
+      </DnsQuery>
+    </RuleGroup>
+    <RuleGroup groupRelation="or">
+      <DnsQuery onmatch="exclude">
+        <QueryName condition="end with">.microsoft.com</QueryName>
+        <QueryName condition="end with">.windows.com</QueryName>
+        <QueryName condition="end with">.windowsupdate.com</QueryName>
+        <QueryName condition="end with">.msftncsi.com</QueryName>
+        <QueryName condition="is">localhost</QueryName>
+      </DnsQuery>
+    </RuleGroup>
+
+    <!-- EID 23 FileDelete (archived copy): FORENSIC. Sysmon copies each
+         matching deleted file into \viktrix-sysmon on the volume root, SYSTEM
+         ACL, no cleanup. Keep the copy only where the file itself is the
+         evidence: executables, scripts, dumps, task definitions and Startup
+         items deleted from user-writable or system paths (attacker cleanup,
+         T1070.004). Everything else goes to EID 26 (log only). Measured
+         before this split: 14,664 copies per 10 h, 5,495 .tmp, 3,659 .json,
+         3,454 without extension; 0 of them an executable or script. -->
+    <RuleGroup groupRelation="or">
+      <FileDelete onmatch="include">
+        <TargetFilename name="technique_id=T1070.004,technique_name=File Deletion" condition="contains">\Start Menu\Programs\Startup\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Windows\System32\Tasks\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Windows\Tasks\</TargetFilename>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\System32\;\Windows\SysWOW64\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.exe</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\System32\;\Windows\SysWOW64\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.dll</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\System32\;\Windows\SysWOW64\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.sys</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.ps1</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.vbs</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.js</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.bat</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.cmd</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.hta</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.lnk</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.scr</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.msi</TargetFilename>
+        </Rule>
+        <Rule groupRelation="and">
+          <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Temp\</TargetFilename>
+          <TargetFilename condition="end with">.dmp</TargetFilename>
+        </Rule>
+      </FileDelete>
+    </RuleGroup>
+
+    <!-- EID 26 FileDeleteDetected (log only): TIMELINE (ransomware / wiper /
+         cleanup in user space, what a dropper removed after itself). Broad
+         include; the exclude set is browser profile and cache stores, MSIX app
+         LocalCache, crash/telemetry spools and the Comms POOM store, which were
+         13,600 of 14,664 deletes per 10 h and never belong to an attack
+         timeline (creates in those paths are still covered by EID 11/29). -->
+    <RuleGroup groupRelation="or">
+      <FileDeleteDetected onmatch="include">
+        <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\System32\;\Windows\SysWOW64\;\Windows\Tasks\;\Windows\Temp\</TargetFilename>
+        <!-- Spec 665 (#665): user-content roots for the mass-delete tripwire (local rules
+             100850/100851). Measured on agent 002 2026-10-02..08 (live sensor, whose config is
+             not this baseline): 6 deletes in 7 days under these roots, max 2 per process
+             per 5 minutes. -->
+        <TargetFilename condition="contains any">\Documents\;\Desktop\;\Pictures\;\Videos\;\Music\;\OneDrive\</TargetFilename>
+      </FileDeleteDetected>
+    </RuleGroup>
+    <RuleGroup groupRelation="or">
+      <FileDeleteDetected onmatch="exclude">
+        <TargetFilename condition="contains any">\Google\Chrome\User Data\;\Microsoft\Edge\User Data\;\EdgeWebView\;\Microsoft\Copilot\User Data\;\Plex\QtWebEngine\</TargetFilename>
+        <TargetFilename condition="contains any">\Comms\Volatile\;\Comms\Unistore\;\INetCache\;\WebCache\;\Code Cache\;\Service Worker\;\Cache_Data\;\GrShaderCache\;\DXCache\;\IdentityCache\</TargetFilename>
+        <TargetFilename condition="contains any">\Packages\;\Crashpad\;\sentry\;\Windows\WER\;\OneDrive\logs\;\OneDrive\settings\;\Microsoft\Office\OTele\;\System32\sru\;\System32\SleepStudy\</TargetFilename>
+      </FileDeleteDetected>
+    </RuleGroup>
+
+    <!-- EID 24 clipboard: empty include logs nothing (privacy; no Wazuh child). -->
+    <RuleGroup groupRelation="or">
+      <ClipboardChange onmatch="include" />
+    </RuleGroup>
+
+    <!-- EID 25 process herpaderp / hollowing: DETECT (61649 is level 0; rule
+         proposed). 3 "Image is replaced" from dllhost per 10 h measured. -->
+    <RuleGroup groupRelation="or">
+      <ProcessTampering onmatch="exclude">
+        <Image condition="is">C:\Windows\System32\svchost.exe</Image>
+      </ProcessTampering>
+    </RuleGroup>
+
+    <!-- EID 27-29: PE written under AppData even when the name is not .exe
+         (dropper as .tmp/.dat/no extension). EID 27 empty include blocks
+         nothing. EID 29 carries the written file's SHA256 and the writer's
+         ProcessGuid (local rule 100829, level 3). Defender definition updates
+         under ProgramData are the measured volume (14 per 10 h, 81 alerts and
+         34 paid calls per 7 d): that is a pipeline provenance claim (#616),
+         not a sensor exclude, because EID 11 would still see the drop and an
+         attacker writing into Definition Updates must stay visible. -->
+    <RuleGroup groupRelation="or">
+      <FileBlockExecutable onmatch="include" />
+    </RuleGroup>
+    <RuleGroup groupRelation="or">
+      <FileExecutableDetected onmatch="include">
+        <TargetFilename condition="contains any">\AppData\;\Temp\;\Downloads\;\Users\Public\;\ProgramData\;\Windows\Tasks\;\Windows\System32\Tasks\;:\PerfLogs\</TargetFilename>
+      </FileExecutableDetected>
+    </RuleGroup>
+
+  </EventFiltering>
+</Sysmon>

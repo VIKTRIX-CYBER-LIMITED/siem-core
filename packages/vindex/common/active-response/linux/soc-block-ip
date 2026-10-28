@@ -1,0 +1,388 @@
+#!/usr/bin/env python3
+"""Wazuh ≥4.2 stateful AR overlay (Linux). Stock block is firewall-drop
+(iptables INPUT+FORWARD DROP); this script is only the signed-ack overlay.
+
+Official protocol: one JSON line on STDIN; check_keys handshake on add;
+https://documentation.wazuh.com/current/user-manual/capabilities/active-response/custom-active-response-scripts.html
+
+Apply recipe matches Wazuh 4.14.6 default-firewall-drop.c:
+  iptables -I/-D INPUT|FORWARD -s <srcip> -j DROP
+"""
+from __future__ import annotations
+
+import hashlib
+import hmac
+import ipaddress
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.error import URLError
+from urllib.request import Request, urlopen
+
+SIDECAR_NAME = "soc-block-ip.secrets.json"
+AR_LOG = Path("/var/ossec/logs/active-responses.log")
+IPTABLES = "iptables"
+CHAINS = ("INPUT", "FORWARD")
+MAX_RULE_COPIES = 32
+
+
+def write_ar_log(message: str) -> None:
+    try:
+        line = f"{datetime.now(timezone.utc).isoformat()} soc-block-ip: {message}\n"
+        AR_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with AR_LOG.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+    except OSError:
+        pass
+
+
+def target_digest(target: str) -> str:
+    return hashlib.sha256(str(target or "").encode("utf-8")).hexdigest()
+
+
+def canonical_ack_body(
+    action: str,
+    agent_id: str,
+    event: str,
+    execution_id: str,
+    local_rule_present: bool,
+    nonce: str,
+    digest: str,
+    ts: str,
+    scope: dict[str, str],
+) -> bytes:
+    material = {
+        "action": str(action or ""),
+        "agent_id": str(agent_id or ""),
+        "event": str(event or ""),
+        "execution_id": str(execution_id or ""),
+        "local_rule_present": bool(local_rule_present),
+        "nonce": str(nonce or ""),
+        "target_digest": str(digest or "").strip().lower(),
+        "ts": str(ts or ""),
+        **{field: scope[field] for field in ("tenant_uuid", "wazuh_instance_id", "enrollment_ref")},
+    }
+    return json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+
+
+def ack_signature(canonical: bytes, key: str) -> str:
+    return hmac.new(key.encode("utf-8"), canonical, hashlib.sha256).hexdigest()
+
+
+def load_ack_config() -> dict[str, str]:
+    names = {
+        "url": "SOC_ACK_URL", "api_key": "SOC_ACK_API_KEY", "hmac_key": "SOC_ACK_HMAC_KEY",
+        "tenant_uuid": "SOC_ACK_TENANT_UUID", "wazuh_instance_id": "SOC_ACK_WAZUH_INSTANCE_ID",
+        "enrollment_ref": "SOC_ACK_ENROLLMENT_REF", "agent_id": "SOC_ACK_AGENT_ID",
+    }
+    config = {key: str(os.environ.get(env) or "").strip() for key, env in names.items()}
+    sidecar = Path(__file__).resolve().parent / SIDECAR_NAME
+    if sidecar.is_file():
+        try:
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        if isinstance(data, dict):
+            for key in names:
+                if not config[key]:
+                    config[key] = str(data.get("ack_url" if key == "url" else key) or "").strip()
+    return config
+
+
+def request_scope_matches(config: dict[str, str], msg: dict) -> bool:
+    """A command must name this provisioned endpoint before firewall I/O."""
+    try:
+        tenant = config["tenant_uuid"]
+        if str(uuid.UUID(tenant)) != tenant:
+            return False
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", config["wazuh_instance_id"]):
+            return False
+        if not re.fullmatch(r"sha256:[a-f0-9]{64}", config["enrollment_ref"]):
+            return False
+        if not re.fullmatch(r"[0-9]{1,6}", config["agent_id"]) or int(config["agent_id"]) == 0:
+            return False
+        data = msg["parameters"]["alert"]["data"]
+        return data.get("action") == "block_ip" and all(
+            data.get(key) == config[key]
+            for key in ("tenant_uuid", "wazuh_instance_id", "enrollment_ref", "agent_id")
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def iptables_bin() -> str | None:
+    return shutil.which(IPTABLES)
+
+
+def _capture_iptables(args: list[str]) -> subprocess.CompletedProcess[str] | None:
+    binary = iptables_bin()
+    if not binary:
+        return None
+    try:
+        return subprocess.run(
+            [binary, *args],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _run_iptables(args: list[str]) -> int:
+    result = _capture_iptables(args)
+    return int(result.returncode) if result is not None else 127
+
+
+def rule_present(srcip: str) -> bool:
+    """True when stock firewall-drop's both DROP rules exist."""
+    return all(
+        _run_iptables(["-C", chain, "-s", srcip, "-j", "DROP"]) == 0
+        for chain in CHAINS
+    )
+
+
+def rules_absent(srcip: str) -> bool:
+    """Read both chains successfully and check for remaining stock DROP rules.
+
+    ``-C`` returning 1 can mean any other error, not only a missing rule.
+    Missing binaries, unreadable tables and partial removal cannot prove recovery.
+    """
+    for chain in CHAINS:
+        result = _capture_iptables(["-S", chain])
+        if result is None or result.returncode != 0 or not result.stdout.strip():
+            return False
+        try:
+            for line in result.stdout.splitlines():
+                fields = shlex.split(line)
+                if len(fields) < 3 or fields[0] not in {"-P", "-A"} or fields[1] != chain:
+                    return False
+                if fields[0] == "-A" and "-s" in fields and "-j" in fields:
+                    source = ipaddress.ip_network(fields[fields.index("-s") + 1])
+                    target = fields[fields.index("-j") + 1]
+                    if target == "DROP" and ipaddress.ip_address(srcip) in source:
+                        return False
+        except (ValueError, IndexError):
+            return False
+    return True
+
+
+def apply_block(srcip: str) -> bool:
+    flag = "-I"
+    ok = True
+    for chain in CHAINS:
+        if _run_iptables([flag, chain, "-s", srcip, "-j", "DROP"]) != 0:
+            ok = False
+    return ok and rule_present(srcip)
+
+
+def remove_block(srcip: str) -> bool:
+    for chain in CHAINS:
+        # Stock -D is not idempotent; drop every matching copy.
+        for _ in range(MAX_RULE_COPIES):
+            if _run_iptables(["-D", chain, "-s", srcip, "-j", "DROP"]) != 0:
+                break
+    return rules_absent(srcip)
+
+
+def send_ack(
+    config: dict[str, str],
+    *,
+    action: str,
+    agent_id: str,
+    execution_id: str,
+    event: str,
+    present: bool,
+    target: str,
+) -> None:
+    ts = datetime.now(timezone.utc).isoformat()
+    nonce = uuid.uuid4().hex
+    digest = target_digest(target)
+    body = canonical_ack_body(
+        action, agent_id, event, execution_id, present, nonce, digest, ts, config
+    )
+    sig = ack_signature(body, config["hmac_key"])
+    request = Request(
+        config["url"],
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "X-API-Key": config["api_key"],
+            "X-SOC-Ack-Signature": sig,
+        },
+    )
+    try:
+        with urlopen(request, timeout=10) as response:
+            response.read()
+    except (URLError, TimeoutError, OSError) as exc:
+        write_ar_log(f"ack failed: {exc}")
+
+
+def read_stdin_line() -> str:
+    return sys.stdin.readline()
+
+
+def write_stdout_line(payload: str) -> None:
+    sys.stdout.write(payload + "\n")
+    sys.stdout.flush()
+
+
+def parse_alert_fields(msg: dict) -> tuple[str, str, str, str]:
+    srcip = ""
+    execution_id = ""
+    agent_id = ""
+    action_name = "block_ip"
+    parameters = msg.get("parameters") if isinstance(msg.get("parameters"), dict) else {}
+    alert = parameters.get("alert") if isinstance(parameters.get("alert"), dict) else {}
+    data = alert.get("data") if isinstance(alert.get("data"), dict) else {}
+    srcip = str(data.get("srcip") or "")
+    execution_id = str(data.get("execution_id") or "")
+    agent_id = str(data.get("agent_id") or "")
+    if data.get("action"):
+        action_name = str(data.get("action"))
+    if not agent_id:
+        agent = alert.get("agent") if isinstance(alert.get("agent"), dict) else {}
+        agent_id = str(agent.get("id") or "")
+    extra = parameters.get("extra_args")
+    extra_list = [str(item) for item in extra] if isinstance(extra, list) else []
+    if not execution_id and extra_list:
+        execution_id = extra_list[-1]
+    if not srcip and extra_list:
+        srcip = extra_list[0]
+    return srcip.strip(), execution_id.strip(), agent_id.strip(), action_name.strip()
+
+
+def valid_block_ip(raw: str) -> str | None:
+    try:
+        ip = ipaddress.ip_address(raw)
+    except ValueError:
+        return None
+    if ip.version != 4 or ip.is_loopback or ip.is_unspecified:
+        return None
+    return raw
+
+
+def handshake_or_abort(srcip: str) -> str | None:
+    keys_msg = {
+        "version": 1,
+        "origin": {"name": "soc-block-ip", "module": "active-response"},
+        "command": "check_keys",
+        "parameters": {"keys": [srcip]},
+    }
+    write_stdout_line(json.dumps(keys_msg, separators=(",", ":")))
+    raw = read_stdin_line()
+    try:
+        resp = json.loads(raw)
+        action = str(resp.get("command") or "").strip().lower()
+    except (json.JSONDecodeError, TypeError):
+        action = "invalid"
+    if action == "abort":
+        write_ar_log("check_keys abort")
+        return "abort"
+    if action != "continue":
+        write_ar_log(f"check_keys invalid:{action}")
+        return "invalid"
+    return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    del argv
+    raw = read_stdin_line()
+    if not raw.strip():
+        write_ar_log("empty STDIN")
+        return 2
+    try:
+        msg = json.loads(raw)
+    except json.JSONDecodeError:
+        write_ar_log("bad STDIN JSON")
+        return 2
+    if not isinstance(msg, dict):
+        write_ar_log("bad STDIN JSON")
+        return 2
+
+    mode = str(msg.get("command") or "").strip().lower()
+    srcip, execution_id, agent_id, action_name = parse_alert_fields(msg)
+    if mode not in ("add", "delete"):
+        write_ar_log(f"unsupported command {mode}")
+        return 2
+    if not execution_id:
+        write_ar_log("missing execution_id")
+        return 2
+    if not agent_id:
+        write_ar_log("missing agent_id")
+        return 2
+
+    config = load_ack_config()
+    if not config["url"] or not config["api_key"] or not config["hmac_key"]:
+        write_ar_log("missing ack config")
+        return 2
+
+    if not request_scope_matches(config, msg):
+        write_ar_log("endpoint scope mismatch")
+        return 2
+
+    if mode == "add":
+        abort = handshake_or_abort(srcip or execution_id)
+        if abort == "abort":
+            return 0
+        if abort:
+            return 2
+        parsed = valid_block_ip(srcip)
+        if not parsed:
+            write_ar_log("missing srcip")
+            return 2
+        if not iptables_bin():
+            write_ar_log("iptables not found")
+            send_ack(
+                config,
+                action=action_name,
+                agent_id=agent_id,
+                execution_id=execution_id,
+                event="failed",
+                present=False,
+                target=parsed,
+            )
+            return 1
+        ok = apply_block(parsed)
+        present = rule_present(parsed)
+        event = "applied" if ok and present else "failed"
+        send_ack(
+            config,
+            action=action_name,
+            agent_id=agent_id,
+            execution_id=execution_id,
+            event=event,
+            present=present,
+            target=parsed,
+        )
+        return 0 if ok else 1
+
+    parsed = valid_block_ip(srcip) or srcip
+    ok = remove_block(parsed) if valid_block_ip(srcip) else False
+    # On removal, any residual rule or unreadable state prevents a clear ack.
+    present = not rules_absent(parsed) if valid_block_ip(srcip) else True
+    ok = ok and not present
+    event = "reverted" if ok else "failed"
+    send_ack(
+        config,
+        action=action_name,
+        agent_id=agent_id,
+        execution_id=execution_id,
+        event=event,
+        present=present,
+        target=srcip,
+    )
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

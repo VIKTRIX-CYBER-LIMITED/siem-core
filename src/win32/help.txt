@@ -1,48 +1,20 @@
-** Wazuh Windows Agent **
-** Copyright (C) 2015, Wazuh Inc. **
+** Vindex Windows Agent **
+** Copyright (C) Viktrix Cyber Limited **
+** Based on Wazuh, Copyright (C) 2015, Wazuh Inc. (GPLv2) **
 
+Thanks for installing the Vindex Windows Agent.
 
-Thanks for installing the 'Wazuh Windows Agent'. Before you continue,
-make sure that you have an instance of the Wazuh manager running and configured
-to accept this system as an agent.
+The agent connects this device to your organisation's Vindex security
+console. If you installed it with an install code from the console, it
+enrols itself and needs no further setup.
 
-For more information on how to install the server version of Wazuh, look at:
-https://documentation.wazuh.com
+To check the agent:
+  - Open "Services" and look for "Vindex Agent".
+  - Agent log: C:\Program Files (x86)\ossec-agent\ossec.log
+  - Configuration: C:\Program Files (x86)\ossec-agent\ossec.conf
 
+Need help? Contact info@viktrixcyber.co.uk or your account manager.
 
-
-** Table of contents **
-
-1- How to obtain more information
-2- What this agent does
-3- Questions/Support
-
-
-
-** Responses **
-
-1- How to obtain more information
-
-You can obtain more information about WAZUH on the following links:
-https://documentation.wazuh.com
-
-
-2- What this agent does
-
-The Windows agent does the following tasks:
-
--Monitors the Windows event log in real time.
--Monitors IIS logs (Web, FTP, SMTP) and any other logs present on your
- system (including Symantec Anti-Virus, MySQL, Apache, etc) in real time.
--Periodically checks the Windows Registry for changes.
--Periodically, or in real-time, checks your Windows folders for changes.
--Periodically does policy verifications to make sure your system is
- configured properly.
-
-
-3- Questions/Support
-
-Visit the following link for information on how to get help or
-support for WAZUH:
-
-https://wazuh.com/
+This program is free software; you can redistribute it and/or modify it
+under the terms of the GNU General Public License (version 2) as published
+by the Free Software Foundation. Source code: see LICENSE.txt.

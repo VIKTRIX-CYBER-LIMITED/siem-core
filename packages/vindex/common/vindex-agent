@@ -1,0 +1,180 @@
+#!/bin/bash
+# vindex-agent: enrol and manage the Vindex agent on Linux and macOS.
+# Copyright (C) Viktrix Cyber Limited. GPLv2, as the Wazuh agent it manages.
+#
+#   vindex-agent enrol <install-code> [--name <agent name>] [--force]
+#   vindex-agent enrol --manager <host> --group <group> [--password <p>] [--name <n>] [--force]
+#   vindex-agent status | restart | version
+#
+# The install code comes from the Vindex console (Endpoints > Add a device); its format is
+# documented in packages/vindex/docs/install-code.md. Enrolment settings are applied by the
+# agent's own register_configure_agent.sh, the same step its package runs at install time.
+
+set -euo pipefail
+# Byte-wise character ranges in the value checks below, whatever the caller's locale.
+export LC_ALL=C
+
+case "$(uname -s)" in
+    Darwin) DIR="/Library/Ossec" ;;
+    *)      DIR="/var/ossec" ;;
+esac
+# The package ships its own copy of the agent's register_configure_agent.sh (src/init in the
+# vindex/4.14.9 tree): the upstream package deletes its installation scripts after install.
+REGISTER=""
+for candidate in "${DIR}/vindex/register_configure_agent.sh" \
+                 "/usr/local/libexec/vindex/register_configure_agent.sh"; do
+    if [ -f "$candidate" ]; then REGISTER="$candidate"; break; fi
+done
+
+die() { echo "vindex-agent: $*" >&2; exit 1; }
+need_root() { [ "$(id -u)" -eq 0 ] || die "run as root (sudo vindex-agent $*)"; }
+
+usage() {
+    sed -n '4,7p' "$0" | sed 's/^# \{0,1\}//'
+    exit "${1:-0}"
+}
+
+b64url_decode() {
+    local s="${1//-/+}"
+    s="${s//_//}"
+    case $(( ${#s} % 4 )) in
+        2) s="${s}==" ;;
+        3) s="${s}=" ;;
+        1) return 1 ;;
+    esac
+    printf '%s' "$s" | openssl base64 -d -A
+}
+
+urldecode() {
+    local v="${1//+/ }"
+    printf '%b' "${v//%/\\x}"
+}
+
+# Same value rules as the Windows installer (vindex-installer.vbs): values land in ossec.conf.
+# POSIX brackets: ']' must come first and '\' is literal, so the patterns live in variables.
+RE_NUM='^[0-9]{1,10}$'
+RE_HOST='^[][A-Za-z0-9.:,-]{1,512}$'
+RE_GROUP='^[A-Za-z0-9_.,-]{1,255}$'
+RE_PASS="^[ !#-%'-;=?-~]{1,128}\$"
+valid() {
+    case "$1" in
+        p|rp|x) [[ "$2" =~ $RE_NUM ]] ;;
+        m|r)    [[ "$2" =~ $RE_HOST ]] ;;
+        g)      [[ "$2" =~ $RE_GROUP ]] ;;
+        k)      [[ "$2" =~ $RE_PASS ]] ;;
+        *)      return 0 ;;
+    esac
+}
+
+decode_code() {
+    local code="$1" payload pair key val
+    [[ "$code" == VDX1.* ]] || die "this is not a Vindex install code; copy it again from the console"
+    payload="$(b64url_decode "${code#VDX1.}" 2>/dev/null)" || die "the install code is damaged; copy it again"
+    [ -n "$payload" ] || die "the install code is damaged; copy it again"
+    local IFS='&'
+    for pair in $payload; do
+        key="${pair%%=*}"
+        val="$(urldecode "${pair#*=}")"
+        valid "$key" "$val" || die "the install code contains an invalid value; create a new code"
+        case "$key" in
+            m)  CODE_MANAGER="$val" ;;
+            r)  CODE_REG_SERVER="$val" ;;
+            p)  CODE_PORT="$val" ;;
+            rp) CODE_REG_PORT="$val" ;;
+            g)  CODE_GROUP="$val" ;;
+            k)  CODE_PASSWORD="$val" ;;
+            x)  CODE_EXPIRY="$val" ;;
+        esac
+    done
+    [ -n "${CODE_MANAGER:-}" ] && [ -n "${CODE_GROUP:-}" ] || die "the install code is incomplete; create a new code"
+    if [ -n "${CODE_EXPIRY:-}" ] && [ "$CODE_EXPIRY" -lt "$(date -u +%s)" ]; then
+        die "this install code has expired; create a new one in the console"
+    fi
+}
+
+restart_agent() {
+    if [ "$(uname -s)" = "Darwin" ]; then
+        "${DIR}/bin/wazuh-control" restart >/dev/null
+    elif command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+        systemctl daemon-reload
+        systemctl enable wazuh-agent >/dev/null 2>&1 || true
+        systemctl restart wazuh-agent
+    else
+        service wazuh-agent restart >/dev/null
+    fi
+}
+
+cmd_enrol() {
+    need_root enrol
+    local code="" manager="" group="" password="" name="" force=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --manager)  manager="${2:?}"; shift 2 ;;
+            --group)    group="${2:?}"; shift 2 ;;
+            --password) password="${2:?}"; shift 2 ;;
+            --name)     name="${2:?}"; shift 2 ;;
+            --force)    force=1; shift ;;
+            -h|--help)  usage 0 ;;
+            -*)         die "unknown option $1" ;;
+            *)          code="$1"; shift ;;
+        esac
+    done
+    [ -n "$REGISTER" ] || die "enrolment script missing; reinstall the Vindex agent"
+
+    CODE_MANAGER=""; CODE_REG_SERVER=""; CODE_PORT=""; CODE_REG_PORT=""; CODE_GROUP=""; CODE_PASSWORD=""
+    if [ -n "$code" ]; then
+        decode_code "$code"
+    fi
+    manager="${manager:-$CODE_MANAGER}"
+    group="${group:-$CODE_GROUP}"
+    password="${password:-$CODE_PASSWORD}"
+    [ -n "$manager" ] || die "give an install code, or --manager and --group"
+    [ -n "$group" ] || die "give an install code, or --group"
+    valid m "$manager" || die "invalid manager address"
+    valid g "$group" || die "invalid group"
+    [ -z "$password" ] || valid k "$password" || die "invalid enrolment password"
+    [ -z "$name" ] || [[ "$name" =~ ^[A-Za-z0-9_.-]{1,128}$ ]] || die "invalid agent name"
+
+    if [ -s "${DIR}/etc/client.keys" ]; then
+        [ "$force" -eq 1 ] || die "this device is already enrolled; add --force to enrol it again (it gets a new agent ID)"
+        : > "${DIR}/etc/client.keys"
+    fi
+
+    # register_configure_agent.sh reads the upstream deployment variables.
+    WAZUH_MANAGER="$manager" \
+    WAZUH_REGISTRATION_SERVER="${CODE_REG_SERVER:-$manager}" \
+    WAZUH_MANAGER_PORT="$CODE_PORT" \
+    WAZUH_REGISTRATION_PORT="$CODE_REG_PORT" \
+    WAZUH_AGENT_GROUP="$group" \
+    WAZUH_REGISTRATION_PASSWORD="$password" \
+    WAZUH_AGENT_NAME="$name" \
+        bash "$REGISTER" "$DIR" >/dev/null
+
+    restart_agent
+    echo "Vindex agent enrolled to ${manager} (group ${group}). The device appears in the console within a few minutes."
+}
+
+cmd_status() {
+    local state
+    state="$("${DIR}/bin/wazuh-control" status 2>/dev/null || true)"
+    echo "$state" | sed 's/wazuh-/vindex-/'
+    if [ -f "${DIR}/var/run/wazuh-agentd.state" ]; then
+        grep -E "^(status|last_keepalive)=" "${DIR}/var/run/wazuh-agentd.state" | sed "s/'//g"
+    fi
+    if [ -f /etc/audit/rules.d/50-soc-audit.rules ] && command -v auditctl >/dev/null 2>&1; then
+        echo "audit rules loaded: $(auditctl -l 2>/dev/null | grep -c 'audit-wazuh\|soc-net' || true)"
+    fi
+}
+
+cmd_version() {
+    "${DIR}/bin/wazuh-control" info 2>/dev/null | sed -n 's/^WAZUH_VERSION="\(.*\)"/Vindex agent \1/p'
+}
+
+case "${1:-}" in
+    enrol|enroll) shift; cmd_enrol "$@" ;;
+    status)       cmd_status ;;
+    restart)      need_root restart; restart_agent; echo "Vindex agent restarted." ;;
+    version)      cmd_version ;;
+    -h|--help|help|"") usage 0 ;;
+    *)            usage 1 ;;
+esac

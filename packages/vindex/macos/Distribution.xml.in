@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Vindex agent product archive. @ARCH@ is arm64 or x86_64; @AGENT_PKG@ the official component. -->
+<installer-gui-script minSpecVersion="2">
+    <title>Vindex Agent</title>
+    <organization>uk.co.viktrixcyber</organization>
+    <background file="background.png" alignment="bottomleft" scaling="none" mime-type="image/png"/>
+    <background-darkAqua file="background.png" alignment="bottomleft" scaling="none" mime-type="image/png"/>
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <license file="LICENSE.txt" mime-type="text/plain"/>
+    <conclusion file="conclusion.html" mime-type="text/html"/>
+    <options customize="never" require-scripts="true" rootVolumeOnly="true" hostArchitectures="@ARCH@"/>
+    <domains enable_localSystem="true"/>
+    <volume-check>
+        <allowed-os-versions><os-version min="10.15"/></allowed-os-versions>
+    </volume-check>
+    <choices-outline>
+        <line choice="default">
+            <line choice="uk.co.viktrixcyber.vindex.agent"/>
+            <line choice="uk.co.viktrixcyber.vindex.tools"/>
+        </line>
+    </choices-outline>
+    <choice id="default" title="Vindex Agent"/>
+    <choice id="uk.co.viktrixcyber.vindex.agent" visible="false" title="Vindex Agent">
+        <pkg-ref id="com.wazuh.pkg.wazuh-agent"/>
+    </choice>
+    <choice id="uk.co.viktrixcyber.vindex.tools" visible="false" title="Vindex command line">
+        <pkg-ref id="uk.co.viktrixcyber.vindex.tools"/>
+    </choice>
+    <pkg-ref id="com.wazuh.pkg.wazuh-agent" version="@VERSION@" onConclusion="none">@AGENT_PKG@</pkg-ref>
+    <pkg-ref id="uk.co.viktrixcyber.vindex.tools" version="@VERSION@" onConclusion="none">vindex-tools.pkg</pkg-ref>
+</installer-gui-script>

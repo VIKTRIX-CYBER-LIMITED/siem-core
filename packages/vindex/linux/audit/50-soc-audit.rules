@@ -1,0 +1,66 @@
+## VIKTRIX SOC Linux endpoint audit baseline (#1058, 2026-10-19).
+##
+## Why: a Caldera/Atomic run on portainer (agent 003) produced 0 technique alerts because the
+## endpoint sent no process-execution or sensitive-file telemetry. These rules add exactly that.
+##
+## Install to /etc/audit/rules.d/50-soc-audit.rules and load with `augenrules --load`
+## (one-line command: docs/operations/wazuh.md, "Linux endpoint audit rules").
+## Keys are the Wazuh stock keys from the manager's etc/lists/audit-keys, so the stock rules in
+## 0365-auditd_rules.xml fire unchanged (no vendor rule tuning):
+##   audit-wazuh-c -> 80792 "Audit: Command"      audit-wazuh-w -> 80780/80781 write
+##   audit-wazuh-r -> 80783/80784 read            audit-wazuh-a -> 80786/80787 attribute
+##
+## Volume control: commands are recorded only for processes that descend from a login session
+## (auid set: SSH, console, su/sudo). Daemons, Docker containers started by containerd and
+## apt timers carry no auid and stay silent. Package maintenance under /usr is not watched.
+## Caveat: a process started by systemd (no login session) is not recorded by the execve rule;
+## its file and persistence writes below still are.
+
+## Commands from logged-in sessions (T1059, discovery, collection, credential access tooling).
+-a always,exit -F arch=b64 -S execve -F auid>=0 -F auid!=unset -k audit-wazuh-c
+-a always,exit -F arch=b32 -S execve -F auid>=0 -F auid!=unset -k audit-wazuh-c
+
+## Credential and account files (T1003.008, T1087.001, T1098, T1136.001).
+-a always,exit -F arch=b64 -F path=/etc/shadow -F perm=r -F auid>=0 -F auid!=unset -k audit-wazuh-r
+-a always,exit -F arch=b64 -F path=/etc/gshadow -F perm=r -F auid>=0 -F auid!=unset -k audit-wazuh-r
+-w /etc/shadow -p wa -k audit-wazuh-w
+-w /etc/gshadow -p wa -k audit-wazuh-w
+-w /etc/passwd -p wa -k audit-wazuh-w
+-w /etc/group -p wa -k audit-wazuh-w
+
+## Privilege escalation configuration (T1548.003).
+-w /etc/sudoers -p wa -k audit-wazuh-w
+-w /etc/sudoers.d/ -p wa -k audit-wazuh-w
+
+## Persistence (T1053.003 cron, T1543.002 systemd, T1098.004 SSH keys, T1546.004 shell profiles,
+## T1574.006 preload, T1037.004 rc scripts).
+-w /etc/crontab -p wa -k audit-wazuh-w
+-w /etc/cron.d/ -p wa -k audit-wazuh-w
+-w /etc/cron.hourly/ -p wa -k audit-wazuh-w
+-w /etc/cron.daily/ -p wa -k audit-wazuh-w
+-w /var/spool/cron/ -p wa -k audit-wazuh-w
+-w /etc/systemd/system/ -p wa -k audit-wazuh-w
+-w /root/.ssh/ -p wa -k audit-wazuh-w
+-w /etc/ssh/sshd_config -p wa -k audit-wazuh-w
+-w /etc/profile -p wa -k audit-wazuh-w
+-w /etc/profile.d/ -p wa -k audit-wazuh-w
+-w /etc/bash.bashrc -p wa -k audit-wazuh-w
+-w /root/.bashrc -p wa -k audit-wazuh-w
+-w /etc/ld.so.preload -p wa -k audit-wazuh-w
+-w /etc/rc.local -p wa -k audit-wazuh-w
+
+## Kernel modules (T1547.006).
+-a always,exit -F arch=b64 -S init_module,finit_module,delete_module -k audit-wazuh-c
+
+## Egress from login sessions (T1041, T1071, T1105 destination; visibility plan 2026-10-22 #3).
+## a2 is the sockaddr length: 16 = AF_INET, 28 = AF_INET6; AF_UNIX (110) is never recorded.
+## Key soc-net is read by manager rule 100921 (level 3). The ENRICHED SADDR (laddr/lport) of
+## the SOCKADDR record stays in full_log, which the pipeline's Linux audit reader parses.
+-a always,exit -F arch=b64 -S connect -F a2=16 -F auid>=0 -F auid!=unset -k soc-net
+-a always,exit -F arch=b64 -S connect -F a2=28 -F auid>=0 -F auid!=unset -k soc-net
+
+## Execution from world-writable staging paths, any auid (T1204, T1059): daemons included,
+## unlike the login-session execve rule above.
+-a always,exit -F arch=b64 -S execve -F dir=/tmp -k audit-wazuh-c
+-a always,exit -F arch=b64 -S execve -F dir=/dev/shm -k audit-wazuh-c
+-a always,exit -F arch=b64 -S execve -F dir=/var/tmp -k audit-wazuh-c

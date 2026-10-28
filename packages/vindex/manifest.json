@@ -1,0 +1,50 @@
+{
+  "product": "Vindex Agent",
+  "vendor": "Viktrix Cyber Limited",
+  "version": "4.14.9",
+  "revision": "1",
+  "manager_compatibility": "Wazuh manager >= 4.14.9 (agents must not be newer than the manager)",
+  "source": {
+    "repository": "https://github.com/VIKTRIX-CYBER-LIMITED/siem-core",
+    "branch": "vindex/4.14.9",
+    "upstream_tag": "v4.14.9"
+  },
+  "upstream": {
+    "base_url": "https://packages.wazuh.com/4.x",
+    "checksum_url": "https://packages.wazuh.com/4.x/checksums/wazuh/4.14.9/<file>.sha512",
+    "sha512": {
+      "wazuh-agent-4.14.9-1.aarch64.rpm": "355d2a5ae190e94c071dc49c61fec8c19ad6d6e80a7244232793273f20bb564226bf6f06e1eb8c37b9031da5fd2af8680dd5b5b6b1f9f4bac5a10434bc9dbef7",
+      "wazuh-agent-4.14.9-1.arm64.pkg": "2d42b5803c0d64c20af69f9bc14ad3060d5f9aa42979a00f44506b5a3939f31e802fb35a662761a9a69351db588bac5973834385135754c6197e5afa2bb72a28",
+      "wazuh-agent-4.14.9-1.intel64.pkg": "36cdfb8cf94e436833329b29249177166b6ed28c5ee1510fe1650649e440a19c11bfa380776fa9ae348e4ee8bf8768d47695f6d618aeab1f6bd3ab5994ebe522",
+      "wazuh-agent-4.14.9-1.x86_64.rpm": "d4ad14b5759a73ed8e047f1b834e9943bbedbb8e17914267ac906e89304b583cc4e78e088a8494260b49a644d29e133e65582f5fe2fd8902325a7e213a15acd6",
+      "wazuh-agent_4.14.9-1_amd64.deb": "b359cd8b73c024afec048a220b9762606cd02eb74da14eab557b7d424ae530d9406e9071bbefab679bb045e8dcb28c3c19ffac60bda1675f0106e3d814576df4",
+      "wazuh-agent_4.14.9-1_arm64.deb": "414f59163ea80ee3cdbb90099ad93922abee26c98af6645e8887e433d4f005b3c7d30955169ab67a3587c6751a4489412d17a9ac6eed6ea885b56dfdc8234c5a"
+    }
+  },
+  "sysmon": {
+    "download_url": "https://download.sysinternals.com/files/Sysmon.zip",
+    "verification": "Microsoft Authenticode signature (O=Microsoft Corporation)",
+    "config": "common/sysmon/sysmon-baseline.xml",
+    "bundled": false
+  },
+  "assets_from": {
+    "repository": "soc-ai-triage",
+    "commit": "b46a0d6bd",
+    "files": {
+      "common/sysmon/sysmon-baseline.xml": "deploy/windows/endpoint/sysmon-baseline.xml",
+      "common/active-response/windows/*": "scripts/wazuh_ar/soc-*.cmd, soc-*.ps1",
+      "common/active-response/linux/soc-block-ip": "scripts/wazuh_ar/soc-block-ip",
+      "linux/audit/50-soc-audit.rules": "deploy/linux/endpoint/50-soc-audit.rules"
+    }
+  },
+  "artifacts": [
+    "vindex-agent-4.14.9-1.msi",
+    "vindex-agent_4.14.9-1_amd64.deb",
+    "vindex-agent_4.14.9-1_arm64.deb",
+    "vindex-agent-4.14.9-1.x86_64.rpm",
+    "vindex-agent-4.14.9-1.aarch64.rpm",
+    "vindex-agent-4.14.9-1.intel64.pkg",
+    "vindex-agent-4.14.9-1.arm64.pkg",
+    "install.sh"
+  ]
+}
