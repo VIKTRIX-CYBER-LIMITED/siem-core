@@ -136,6 +136,10 @@ agent/latest/install.sh                          (copy of the current release's 
   `VINDEX_MANAGER_PORT`, `VINDEX_PROTOCOL`
 - `SYSMON` (`install` | `required` | `skip`), `SYSMON_CONFIG` (`keep` | `replace`), `SYSMON_ZIP`
 
+A fresh install with a manager (`INSTALL_CODE`, `VINDEX_MANAGER` or `ADDRESS`) starts `WazuhSvc`
+when it finishes, so the agent enrols without a reboot. Without a manager the service stays stopped
+until one is configured. A failed start does not fail the install.
+
 The setup log is `C:\Program Files (x86)\ossec-agent\vindex\setup.log`. Secrets are hidden from
 verbose MSI logs.
 

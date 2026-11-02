@@ -138,6 +138,8 @@
         <CustomAction Id="StopOssecService" Directory="APPLICATIONFOLDER" ExeCommand="NET STOP OssecSvc" Execute="deferred" Impersonate="no" Return="ignore" />
         <CustomAction Id="DeleteOssecService" Directory="APPLICATIONFOLDER" ExeCommand="SC DELETE OssecSvc" Execute="deferred" Impersonate="no" Return="ignore" />
         <CustomAction Id="StartWazuhSvc" BinaryKey="InstallerScripts" VBScriptCall="StartWazuhSvc" Return="check" Execute="immediate" Impersonate="no"/>
+        <!-- Commit, not immediate: it runs elevated even when msiexec was not, and after CustomAction_InstallerScripts has written ossec.conf. -->
+        <CustomAction Id="StartWazuhSvcFirstInstall" BinaryKey="InstallerScripts" VBScriptCall="StartWazuhSvc" Return="ignore" Execute="commit" Impersonate="no"/>
 
         <!-- Close the Wazuh agent GUI -->
         <CustomAction Id="CloseGUI" BinaryKey="InstallerScripts" VBScriptCall="KillGUITask" Return="check" Execute="deferred" Impersonate="no"/>
@@ -213,6 +215,9 @@
 
             <!-- Start services if necessary -->
             <Custom Action="StartWazuhSvc" After="InstallFinalize">((WIX_UPGRADE_DETECTED) OR (PATCH)) AND ((OSSECRUNNING = "Running") OR (WAZUHRUNNING = "Running"))</Custom>
+
+            <!-- Vindex: a fresh install with a manager (VINDEX_MANAGER, ADDRESS or a valid INSTALL_CODE) starts the agent; without one it stays stopped. -->
+            <Custom Action="StartWazuhSvcFirstInstall" Before="InstallFinalize">(NOT WIX_UPGRADE_DETECTED) AND (NOT PATCH) AND (NOT Installed) AND (VINDEX_MANAGER &lt;&gt; "")</Custom>
 
             <!-- Stop the service as soon as possible on uninstall, and only on uninstall, in order to unlock the files and folders that must be deleted. -->
 			<Custom Action="SetRemoveAllDataValue" Before="InstallFinalize">(NOT UPGRADINGPRODUCTCODE) AND (REMOVE="ALL")</Custom>
